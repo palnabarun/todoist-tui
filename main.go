@@ -140,14 +140,14 @@ func initialModel(columns []string) model {
 
 	// Return initialized model with default values
 	return model{
-		loading:           true,                    // Start in loading state
-		client:            NewTodoistClient(token), // Initialize API client
-		columns:           columns,                 // Store column configuration
-		width:             80,                      // Default terminal width
-		height:            24,                      // Default terminal height
-		selectedIndex:     -1,                      // No task selected initially
-		showingPopup:      false,                   // Popup hidden initially
-		allTasks:          []TodoistTask{},         // Empty task list initially
+		loading:              true,                    // Start in loading state
+		client:               NewTodoistClient(token), // Initialize API client
+		columns:              columns,                 // Store column configuration
+		width:                80,                      // Default terminal width
+		height:               24,                      // Default terminal height
+		selectedIndex:        -1,                      // No task selected initially
+		showingPopup:         false,                   // Popup hidden initially
+		allTasks:             []TodoistTask{},         // Empty task list initially
 		showingCreateTask:    false,                   // Create task form hidden initially
 		newTaskContent:       "",                      // Empty new task content initially
 		creating:             false,                   // Not creating a task initially
@@ -195,8 +195,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Check for delete combination first (Cmd+Backspace on macOS, Alt+Backspace elsewhere)
-		if (msg.Type == tea.KeyBackspace && msg.Alt) || 
-		   (msg.Type == tea.KeyBackspace && runtime.GOOS == "darwin" && msg.Alt) {
+		if (msg.Type == tea.KeyBackspace && msg.Alt) ||
+			(msg.Type == tea.KeyBackspace && runtime.GOOS == "darwin" && msg.Alt) {
 			// Handle delete for current view
 			if !m.showingDeleteConfirm && !m.showingCreateTask {
 				if m.selectedIndex >= 0 && m.selectedIndex < len(m.allTasks) {
@@ -283,7 +283,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.allTasks = updatedTasks
 		m.tasks = updatedTasks
-		
+
 		// Adjust selection if needed
 		if m.selectedIndex >= len(m.allTasks) {
 			if len(m.allTasks) > 0 {
@@ -886,7 +886,7 @@ func (m model) handleMainViewInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showingCreateTask = true
 			m.newTaskContent = ""
 		}
-	// Delete case is now handled globally above
+		// Delete case is now handled globally above
 	}
 	return m, nil
 }
@@ -901,7 +901,7 @@ func (m model) handlePopupInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open task in Todoist
 		if m.selectedIndex >= 0 && m.selectedIndex < len(m.allTasks) {
 			task := m.allTasks[m.selectedIndex]
-			browser.OpenURL(task.URL)
+			_ = browser.OpenURL(task.URL)
 		}
 	case "e", "E":
 		// Complete the selected task from popup
@@ -910,7 +910,7 @@ func (m model) handlePopupInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showingPopup = false // Close popup first
 			return m, completeTask(m.client, selectedTask.ID)
 		}
-	// Delete case is now handled globally above
+		// Delete case is now handled globally above
 	}
 	return m, nil
 }

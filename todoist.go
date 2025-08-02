@@ -118,7 +118,7 @@ func (c *TodoistClient) GetTasks() ([]TodoistTask, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check if the API returned a success status
 	if resp.StatusCode != http.StatusOK {
@@ -151,7 +151,7 @@ func (c *TodoistClient) GetProjects() ([]TodoistProject, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check if the API returned a success status
 	if resp.StatusCode != http.StatusOK {
@@ -323,7 +323,7 @@ func (c *TodoistClient) CreateTask(task NewTaskRequest) (*TodoistTask, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check if the API returned a success status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -355,7 +355,7 @@ func (c *TodoistClient) CompleteTask(taskID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to make request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check if the API returned a success status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
@@ -381,7 +381,7 @@ func (c *TodoistClient) DeleteTask(taskID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to make request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check if the API returned a success status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
@@ -413,7 +413,7 @@ func createTask(client *TodoistClient, content string) tea.Cmd {
 			Content:   content,
 			DueString: "today",
 		}
-		
+
 		// Call the API to create the task
 		createdTask, err := client.CreateTask(taskRequest)
 		if err != nil {
