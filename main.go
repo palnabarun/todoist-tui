@@ -149,7 +149,9 @@ type createTaskFormState struct {
 	priority           int    // 1-4 (1=low, 4=urgent)
 	projectID          string
 	projectName        string
-	selectedProjectIdx int    // Index in the projects list
+	selectedProjectIdx int    // Index in the filtered projects list
+	projectSearch      string // Search query for project filtering
+	filteredProjects   []TodoistProject // Filtered list of projects based on search
 	deadline           string
 	activeField        createTaskFormField
 }
@@ -183,6 +185,8 @@ func initialModel(columns []string) model {
 			projectID:          "",          // No project selected initially
 			projectName:        "Inbox",     // Default to Inbox
 			selectedProjectIdx: -1,          // No project selected initially
+			projectSearch:      "",          // No search query initially
+			filteredProjects:   []TodoistProject{}, // Empty filtered list initially
 			deadline:           "today",     // Default to today
 			activeField:        fieldContent, // Start with content field active
 		},
@@ -227,6 +231,54 @@ func loadProjects(client *TodoistClient) tea.Cmd {
 		// Return loaded projects on success
 		return projectsLoadedMsg(projects)
 	})
+}
+
+// fuzzySearchProjects filters projects based on a search query using simple fuzzy matching
+// Returns projects that contain all characters from the query in order (case-insensitive)
+func fuzzySearchProjects(projects []TodoistProject, query string) []TodoistProject {
+	if query == "" {
+		return projects
+	}
+
+	var filtered []TodoistProject
+	queryLower := strings.ToLower(query)
+	
+	for _, project := range projects {
+		projectNameLower := strings.ToLower(project.Name)
+		
+		// Simple fuzzy matching: check if all characters from query appear in order
+		queryIdx := 0
+		for _, char := range projectNameLower {
+			if queryIdx < len(queryLower) && char == rune(queryLower[queryIdx]) {
+				queryIdx++
+			}
+		}
+		
+		// If all query characters were found in order, include this project
+		if queryIdx == len(queryLower) {
+			filtered = append(filtered, project)
+		}
+	}
+	
+	return filtered
+}
+
+// updateProjectFilter updates the filtered projects list and resets selection
+func (m *model) updateProjectFilter() {
+	m.createTaskForm.filteredProjects = fuzzySearchProjects(m.projects, m.createTaskForm.projectSearch)
+	
+	// Reset selection to first filtered project if available
+	if len(m.createTaskForm.filteredProjects) > 0 {
+		m.createTaskForm.selectedProjectIdx = 0
+		project := m.createTaskForm.filteredProjects[0]
+		m.createTaskForm.projectID = project.ID
+		m.createTaskForm.projectName = project.Name
+	} else {
+		// No matches, clear selection
+		m.createTaskForm.selectedProjectIdx = -1
+		m.createTaskForm.projectID = ""
+		m.createTaskForm.projectName = "No matches"
+	}
 }
 
 // Update handles incoming messages and updates the model state accordingly
@@ -293,6 +345,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projectsLoadedMsg:
 		// Handle successful project loading
 		m.projects = []TodoistProject(msg)
+		// Initialize filtered projects with all projects
+		m.createTaskForm.filteredProjects = m.projects
 		// Set default project to first one (usually Inbox) if available
 		if len(m.projects) > 0 {
 			m.createTaskForm.selectedProjectIdx = 0
@@ -319,6 +373,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			projectID:          defaultProjectID,
 			projectName:        defaultProjectName,
 			selectedProjectIdx: defaultProjectIdx,
+			projectSearch:      "",
+			filteredProjects:   m.projects, // Reset to all projects
 			deadline:           "today",
 			activeField:        fieldContent,
 		}
@@ -866,10 +922,26 @@ func (m model) renderCreateTaskForm() string {
 	} else {
 		content.WriteString(popupFieldStyle.Render("  Project: "))
 	}
-	// Show project with navigation indicators if this field is active
-	if form.activeField == fieldProject && len(m.projects) > 1 {
-		content.WriteString("◀ " + form.projectName + " ▶")
-		content.WriteString(fmt.Sprintf(" (%d/%d)", form.selectedProjectIdx+1, len(m.projects)))
+	
+	// Show search input and selection when project field is active
+	if form.activeField == fieldProject {
+		// Show search query with cursor
+		if form.projectSearch != "" {
+			content.WriteString(fmt.Sprintf("Search: %s│", form.projectSearch))
+		} else {
+			content.WriteString("Search: │")
+		}
+		content.WriteString("\n")
+		
+		// Show selected project from filtered results
+		if len(form.filteredProjects) > 0 {
+			content.WriteString(fmt.Sprintf("Selected: ◀ %s ▶ (%d/%d)", 
+				form.projectName, 
+				form.selectedProjectIdx+1, 
+				len(form.filteredProjects)))
+		} else {
+			content.WriteString("No matching projects")
+		}
 	} else {
 		content.WriteString(form.projectName)
 	}
@@ -898,7 +970,7 @@ func (m model) renderCreateTaskForm() string {
 		case fieldPriority:
 			content.WriteString("←/→: change priority")
 		case fieldProject:
-			content.WriteString("←/→/↑/↓: select project")
+			content.WriteString("Type: search • ←/→/↑/↓: select • Backspace: clear")
 		default:
 			content.WriteString("Type to edit field")
 		}
@@ -1016,12 +1088,15 @@ func (m model) handleMainViewInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showingCreateTask = true
 			// Reset form state
 			m.createTaskForm = createTaskFormState{
-				content:     "",
-				priority:    1,
-				projectID:   "",
-				projectName: "Inbox",
-				deadline:    "today",
-				activeField: fieldContent,
+				content:          "",
+				priority:         1,
+				projectID:        "",
+				projectName:      "Inbox",
+				selectedProjectIdx: -1,
+				projectSearch:    "",
+				filteredProjects: m.projects,
+				deadline:         "today",
+				activeField:      fieldContent,
 			}
 		}
 		// Delete case is now handled globally above
@@ -1065,12 +1140,15 @@ func (m model) handleCreateTaskInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Cancel create task form
 		m.showingCreateTask = false
 		m.createTaskForm = createTaskFormState{
-			content:     "",
-			priority:    1,
-			projectID:   "",
-			projectName: "Inbox",
-			deadline:    "today",
-			activeField: fieldContent,
+			content:          "",
+			priority:         1,
+			projectID:        "",
+			projectName:      "Inbox",
+			selectedProjectIdx: -1,
+			projectSearch:    "",
+			filteredProjects: m.projects,
+			deadline:         "today",
+			activeField:      fieldContent,
 		}
 	case "enter":
 		// Submit the new task if content is not empty
@@ -1113,6 +1191,11 @@ func (m model) handleCreateTaskInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.createTaskForm.content) > 0 {
 				m.createTaskForm.content = m.createTaskForm.content[:len(m.createTaskForm.content)-1]
 			}
+		case fieldProject:
+			if len(m.createTaskForm.projectSearch) > 0 {
+				m.createTaskForm.projectSearch = m.createTaskForm.projectSearch[:len(m.createTaskForm.projectSearch)-1]
+				m.updateProjectFilter()
+			}
 		case fieldDeadline:
 			if len(m.createTaskForm.deadline) > 0 {
 				m.createTaskForm.deadline = m.createTaskForm.deadline[:len(m.createTaskForm.deadline)-1]
@@ -1139,31 +1222,37 @@ func (m model) handleCreateTaskInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case fieldProject:
-			// Handle project selection with arrow keys
+			// Handle project selection with arrow keys or typing for search
 			switch msg.String() {
 			case "right", "down":
-				if len(m.projects) > 0 {
-					if m.createTaskForm.selectedProjectIdx < len(m.projects)-1 {
+				if len(m.createTaskForm.filteredProjects) > 0 {
+					if m.createTaskForm.selectedProjectIdx < len(m.createTaskForm.filteredProjects)-1 {
 						m.createTaskForm.selectedProjectIdx++
 					} else {
 						m.createTaskForm.selectedProjectIdx = 0 // Wrap to first project
 					}
 					// Update project info
-					project := m.projects[m.createTaskForm.selectedProjectIdx]
+					project := m.createTaskForm.filteredProjects[m.createTaskForm.selectedProjectIdx]
 					m.createTaskForm.projectID = project.ID
 					m.createTaskForm.projectName = project.Name
 				}
 			case "left", "up":
-				if len(m.projects) > 0 {
+				if len(m.createTaskForm.filteredProjects) > 0 {
 					if m.createTaskForm.selectedProjectIdx > 0 {
 						m.createTaskForm.selectedProjectIdx--
 					} else {
-						m.createTaskForm.selectedProjectIdx = len(m.projects) - 1 // Wrap to last project
+						m.createTaskForm.selectedProjectIdx = len(m.createTaskForm.filteredProjects) - 1 // Wrap to last project
 					}
 					// Update project info
-					project := m.projects[m.createTaskForm.selectedProjectIdx]
+					project := m.createTaskForm.filteredProjects[m.createTaskForm.selectedProjectIdx]
 					m.createTaskForm.projectID = project.ID
 					m.createTaskForm.projectName = project.Name
+				}
+			default:
+				// Add typed characters to project search
+				if len(msg.String()) == 1 && msg.String() != "\x1b" {
+					m.createTaskForm.projectSearch += msg.String()
+					m.updateProjectFilter()
 				}
 			}
 		case fieldDeadline:
