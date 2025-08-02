@@ -188,6 +188,17 @@ func (c *TodoistClient) loadProjects() error {
 	return nil
 }
 
+// LoadProjectsFromCache populates the client's project cache from cached project data
+func (c *TodoistClient) LoadProjectsFromCache(projects []TodoistProject) {
+	// Clear existing project cache
+	c.projects = make(map[string]string)
+	
+	// Populate cache with project ID to name mappings
+	for _, project := range projects {
+		c.projects[project.ID] = project.Name
+	}
+}
+
 // GetProjectName returns the project name for a given project ID
 // Returns "Unknown Project" if the project ID is not found in the cache
 func (c *TodoistClient) GetProjectName(projectID string) string {

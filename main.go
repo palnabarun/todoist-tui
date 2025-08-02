@@ -89,6 +89,8 @@ type model struct {
 	error error
 	// client is the Todoist API client instance
 	client *TodoistClient
+	// cache handles SQLite caching for tasks and projects
+	cache *CacheDB
 	// columns defines which table columns to display
 	columns []string
 	// width is the current terminal width
@@ -113,6 +115,8 @@ type model struct {
 	showingDeleteConfirm bool
 	// taskToDelete holds the ID of the task pending deletion
 	taskToDelete string
+	// refreshingInBackground indicates if cache refresh is happening
+	refreshingInBackground bool
 }
 
 // tasksLoadedMsg is sent when tasks have been successfully loaded from the API
@@ -120,6 +124,13 @@ type tasksLoadedMsg []TodoistTask
 
 // projectsLoadedMsg is sent when projects have been successfully loaded from the API
 type projectsLoadedMsg []TodoistProject
+
+// cacheLoadedMsg is sent when data has been loaded from cache
+type cacheLoadedMsg struct {
+	tasks     []TodoistTask
+	projects  []TodoistProject
+	fromCache bool
+}
 
 // errorMsg is sent when an error occurs during API operations
 type errorMsg error
@@ -146,11 +157,11 @@ const (
 // createTaskFormState holds the state of the create task form
 type createTaskFormState struct {
 	content            string
-	priority           int    // 1-4 (1=low, 4=urgent)
+	priority           int // 1-4 (1=low, 4=urgent)
 	projectID          string
 	projectName        string
-	selectedProjectIdx int    // Index in the filtered projects list
-	projectSearch      string // Search query for project filtering
+	selectedProjectIdx int              // Index in the filtered projects list
+	projectSearch      string           // Search query for project filtering
 	filteredProjects   []TodoistProject // Filtered list of projects based on search
 	deadline           string
 	activeField        createTaskFormField
@@ -166,32 +177,42 @@ func initialModel(columns []string) model {
 		}
 	}
 
+	// Initialize cache
+	cache, err := NewCacheDB()
+	if err != nil {
+		return model{
+			error: fmt.Errorf("failed to initialize cache: %w", err),
+		}
+	}
+
 	// Return initialized model with default values
 	return model{
-		loading:              true,                    // Start in loading state
-		client:               NewTodoistClient(token), // Initialize API client
-		columns:              columns,                 // Store column configuration
-		width:                80,                      // Default terminal width
-		height:               24,                      // Default terminal height
-		selectedIndex:        -1,                      // No task selected initially
-		showingPopup:         false,                   // Popup hidden initially
-		allTasks:             []TodoistTask{},         // Empty task list initially
-		projects:             []TodoistProject{},      // Empty projects list initially
-		showingCreateTask: false, // Create task form hidden initially
-		creating:          false, // Not creating a task initially
+		loading:           true,                    // Start in loading state
+		client:            NewTodoistClient(token), // Initialize API client
+		cache:             cache,                   // Initialize cache
+		columns:           columns,                 // Store column configuration
+		width:             80,                      // Default terminal width
+		height:            24,                      // Default terminal height
+		selectedIndex:     -1,                      // No task selected initially
+		showingPopup:      false,                   // Popup hidden initially
+		allTasks:          []TodoistTask{},         // Empty task list initially
+		projects:          []TodoistProject{},      // Empty projects list initially
+		showingCreateTask: false,                   // Create task form hidden initially
+		creating:          false,                   // Not creating a task initially
 		createTaskForm: createTaskFormState{
 			content:            "",
-			priority:           1,           // Default to low priority
-			projectID:          "",          // No project selected initially
-			projectName:        "Inbox",     // Default to Inbox
-			selectedProjectIdx: -1,          // No project selected initially
-			projectSearch:      "",          // No search query initially
+			priority:           1,                  // Default to low priority
+			projectID:          "",                 // No project selected initially
+			projectName:        "Inbox",            // Default to Inbox
+			selectedProjectIdx: -1,                 // No project selected initially
+			projectSearch:      "",                 // No search query initially
 			filteredProjects:   []TodoistProject{}, // Empty filtered list initially
-			deadline:           "today",     // Default to today
-			activeField:        fieldContent, // Start with content field active
+			deadline:           "today",            // Default to today
+			activeField:        fieldContent,       // Start with content field active
 		},
-		showingDeleteConfirm: false,                   // Delete confirmation hidden initially
-		taskToDelete:         "",                      // No task pending deletion initially
+		showingDeleteConfirm:   false, // Delete confirmation hidden initially
+		taskToDelete:           "",    // No task pending deletion initially
+		refreshingInBackground: false, // Not refreshing initially
 	}
 }
 
@@ -201,8 +222,8 @@ func (m model) Init() tea.Cmd {
 	if m.error != nil {
 		return nil
 	}
-	// Start loading both tasks and projects from the API
-	return tea.Batch(loadTasks(m.client), loadProjects(m.client))
+	// Load from cache first for fast startup
+	return loadFromCacheWithCmd(m.client, m.cache)
 }
 
 // loadTasks creates a command that fetches tasks from Todoist API in the background
@@ -219,17 +240,56 @@ func loadTasks(client *TodoistClient) tea.Cmd {
 	})
 }
 
-// loadProjects creates a command that fetches projects from Todoist API in the background
-func loadProjects(client *TodoistClient) tea.Cmd {
+// loadFromCacheWithCmd loads data from cache with fallback to API
+func loadFromCacheWithCmd(client *TodoistClient, cache *CacheDB) tea.Cmd {
 	return tea.Cmd(func() tea.Msg {
-		// Call the API to get projects
+		// Try to load from cache first with proper filtering and sorting
+		cachedTasks, tasksErr := cache.LoadTodaysTasks()
+		cachedProjects, projectsErr := cache.LoadProjects()
+
+		// If cache is available and recent, use it
+		tasksStale := cache.IsStale("tasks", 5*time.Minute)
+		projectsStale := cache.IsStale("projects", 30*time.Minute)
+
+		if tasksErr == nil && projectsErr == nil && !tasksStale && !projectsStale {
+			// Use cached data
+			return cacheLoadedMsg{
+				tasks:     cachedTasks,
+				projects:  cachedProjects,
+				fromCache: true,
+			}
+		}
+
+		// Cache is stale or unavailable, fetch from API
+		tasks, err := client.GetTodaysTasks()
+		if err != nil {
+			// Fallback to cached data if API fails
+			if tasksErr == nil {
+				tasks = cachedTasks
+			} else {
+				return errorMsg(err)
+			}
+		}
+
 		projects, err := client.GetProjects()
 		if err != nil {
-			// Return error message if API call fails
-			return errorMsg(err)
+			// Fallback to cached data if API fails
+			if projectsErr == nil {
+				projects = cachedProjects
+			} else {
+				return errorMsg(err)
+			}
 		}
-		// Return loaded projects on success
-		return projectsLoadedMsg(projects)
+
+		// Save fresh data to cache
+		_ = cache.SaveTasks(tasks)
+		_ = cache.SaveProjects(projects)
+
+		return cacheLoadedMsg{
+			tasks:     tasks,
+			projects:  projects,
+			fromCache: false,
+		}
 	})
 }
 
@@ -242,10 +302,10 @@ func fuzzySearchProjects(projects []TodoistProject, query string) []TodoistProje
 
 	var filtered []TodoistProject
 	queryLower := strings.ToLower(query)
-	
+
 	for _, project := range projects {
 		projectNameLower := strings.ToLower(project.Name)
-		
+
 		// Simple fuzzy matching: check if all characters from query appear in order
 		queryIdx := 0
 		for _, char := range projectNameLower {
@@ -253,20 +313,20 @@ func fuzzySearchProjects(projects []TodoistProject, query string) []TodoistProje
 				queryIdx++
 			}
 		}
-		
+
 		// If all query characters were found in order, include this project
 		if queryIdx == len(queryLower) {
 			filtered = append(filtered, project)
 		}
 	}
-	
+
 	return filtered
 }
 
 // updateProjectFilter updates the filtered projects list and resets selection
 func (m *model) updateProjectFilter() {
 	m.createTaskForm.filteredProjects = fuzzySearchProjects(m.projects, m.createTaskForm.projectSearch)
-	
+
 	// Reset selection to first filtered project if available
 	if len(m.createTaskForm.filteredProjects) > 0 {
 		m.createTaskForm.selectedProjectIdx = 0
@@ -342,9 +402,82 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case cacheLoadedMsg:
+		// Handle data loaded from cache or fresh API call
+		m.tasks = msg.tasks
+		m.allTasks = msg.tasks
+		m.projects = msg.projects
+		m.loading = false
+		m.error = nil
+
+		// Populate client's project cache for project name lookups
+		m.client.LoadProjectsFromCache(m.projects)
+
+		// Initialize filtered projects with all projects
+		m.createTaskForm.filteredProjects = m.projects
+
+		// Set initial selection to first task if we have tasks
+		if len(m.allTasks) > 0 && m.selectedIndex == -1 {
+			m.selectedIndex = 0
+		}
+		// Reset selection if it's out of bounds
+		if m.selectedIndex >= len(m.allTasks) {
+			if len(m.allTasks) > 0 {
+				m.selectedIndex = 0
+			} else {
+				m.selectedIndex = -1
+			}
+		}
+
+		// Set default project to first one (usually Inbox) if available
+		if len(m.projects) > 0 {
+			m.createTaskForm.selectedProjectIdx = 0
+			m.createTaskForm.projectID = m.projects[0].ID
+			m.createTaskForm.projectName = m.projects[0].Name
+		}
+
+		// If data was loaded from cache, start background refresh
+		if msg.fromCache && !m.refreshingInBackground {
+			m.refreshingInBackground = true
+			return m, refreshCacheInBackground(m.client, m.cache)
+		}
+
+	case cacheRefreshedMsg:
+		// Handle cache refresh completion - update UI with fresh data
+		m.refreshingInBackground = false
+		m.tasks = msg.tasks
+		m.allTasks = msg.tasks
+		m.projects = msg.projects
+
+		// Populate client's project cache for project name lookups
+		m.client.LoadProjectsFromCache(m.projects)
+
+		// Update filtered projects
+		m.createTaskForm.filteredProjects = m.projects
+
+		// Maintain current selection if possible
+		if m.selectedIndex >= len(m.allTasks) {
+			if len(m.allTasks) > 0 {
+				m.selectedIndex = len(m.allTasks) - 1
+			} else {
+				m.selectedIndex = -1
+			}
+		}
+
+		// Update current project selection in create form
+		if len(m.projects) > 0 && m.createTaskForm.selectedProjectIdx >= 0 && m.createTaskForm.selectedProjectIdx < len(m.projects) {
+			project := m.projects[m.createTaskForm.selectedProjectIdx]
+			m.createTaskForm.projectID = project.ID
+			m.createTaskForm.projectName = project.Name
+		}
+
 	case projectsLoadedMsg:
-		// Handle successful project loading
+		// Handle successful project loading (fallback for old API calls)
 		m.projects = []TodoistProject(msg)
+
+		// Populate client's project cache for project name lookups
+		m.client.LoadProjectsFromCache(m.projects)
+
 		// Initialize filtered projects with all projects
 		m.createTaskForm.filteredProjects = m.projects
 		// Set default project to first one (usually Inbox) if available
@@ -380,6 +513,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = true
 
+		// Also save updated tasks to cache
+		_ = m.cache.SaveTasks(m.allTasks)
 		return m, loadTasks(m.client)
 	case taskCompletedMsg:
 		// Handle successful task completion
@@ -451,7 +586,11 @@ func (m model) View() string {
 
 	// Handle loading state
 	if m.loading {
-		b.WriteString(loadingStyle.Render("Loading tasks..."))
+		if m.refreshingInBackground {
+			b.WriteString(loadingStyle.Render("Loading tasks... (refreshing in background)"))
+		} else {
+			b.WriteString(loadingStyle.Render("Loading tasks..."))
+		}
 		b.WriteString("\n\nPress Ctrl+C to quit")
 		return b.String()
 	}
@@ -922,7 +1061,7 @@ func (m model) renderCreateTaskForm() string {
 	} else {
 		content.WriteString(popupFieldStyle.Render("  Project: "))
 	}
-	
+
 	// Show search input and selection when project field is active
 	if form.activeField == fieldProject {
 		// Show search query with cursor
@@ -932,12 +1071,12 @@ func (m model) renderCreateTaskForm() string {
 			content.WriteString("Search: │")
 		}
 		content.WriteString("\n")
-		
+
 		// Show selected project from filtered results
 		if len(form.filteredProjects) > 0 {
-			content.WriteString(fmt.Sprintf("Selected: ◀ %s ▶ (%d/%d)", 
-				form.projectName, 
-				form.selectedProjectIdx+1, 
+			content.WriteString(fmt.Sprintf("Selected: ◀ %s ▶ (%d/%d)",
+				form.projectName,
+				form.selectedProjectIdx+1,
 				len(form.filteredProjects)))
 		} else {
 			content.WriteString("No matching projects")
@@ -1045,7 +1184,7 @@ func (m model) handleMainViewInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Refresh tasks if not currently loading and no error
 		if !m.loading && m.error == nil {
 			m.loading = true
-			return m, loadTasks(m.client)
+			return m, loadFromCacheWithCmd(m.client, m.cache)
 		}
 	case "up", "k":
 		// Move selection up if we have tasks
@@ -1088,15 +1227,15 @@ func (m model) handleMainViewInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showingCreateTask = true
 			// Reset form state
 			m.createTaskForm = createTaskFormState{
-				content:          "",
-				priority:         1,
-				projectID:        "",
-				projectName:      "Inbox",
+				content:            "",
+				priority:           1,
+				projectID:          "",
+				projectName:        "Inbox",
 				selectedProjectIdx: -1,
-				projectSearch:    "",
-				filteredProjects: m.projects,
-				deadline:         "today",
-				activeField:      fieldContent,
+				projectSearch:      "",
+				filteredProjects:   m.projects,
+				deadline:           "today",
+				activeField:        fieldContent,
 			}
 		}
 		// Delete case is now handled globally above
@@ -1140,24 +1279,24 @@ func (m model) handleCreateTaskInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Cancel create task form
 		m.showingCreateTask = false
 		m.createTaskForm = createTaskFormState{
-			content:          "",
-			priority:         1,
-			projectID:        "",
-			projectName:      "Inbox",
+			content:            "",
+			priority:           1,
+			projectID:          "",
+			projectName:        "Inbox",
 			selectedProjectIdx: -1,
-			projectSearch:    "",
-			filteredProjects: m.projects,
-			deadline:         "today",
-			activeField:      fieldContent,
+			projectSearch:      "",
+			filteredProjects:   m.projects,
+			deadline:           "today",
+			activeField:        fieldContent,
 		}
 	case "enter":
 		// Submit the new task if content is not empty
 		if strings.TrimSpace(m.createTaskForm.content) != "" {
 			m.creating = true
-			return m, createTaskWithDetails(m.client, 
-				m.createTaskForm.content, 
-				m.createTaskForm.priority, 
-				m.createTaskForm.projectID, 
+			return m, createTaskWithDetails(m.client,
+				m.createTaskForm.content,
+				m.createTaskForm.priority,
+				m.createTaskForm.projectID,
 				m.createTaskForm.deadline)
 		}
 	case "tab", "down":
@@ -1304,8 +1443,20 @@ func main() {
 		}
 	}
 
+	// Initialize the model
+	model := initialModel(columns)
+
+	// Set up cleanup for cache database
+	if model.cache != nil {
+		defer func() {
+			if err := model.cache.Close(); err != nil {
+				fmt.Printf("Error closing cache: %v\n", err)
+			}
+		}()
+	}
+
 	// Initialize and run the Bubble Tea program
-	p := tea.NewProgram(initialModel(columns))
+	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running program: %v", err)
 		os.Exit(1)
