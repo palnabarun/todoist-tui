@@ -1,0 +1,13 @@
+version: 2
+
+run:
+  timeout: 5m
+  go: "1.24"
+
+output:
+  format: colored-line-number
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0

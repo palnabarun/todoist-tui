@@ -41,3 +41,6 @@ todoist-tui.exe
 # Temporary files
 tmp/
 temp/
+
+# Linter cache
+.golangci-lint-cache/
