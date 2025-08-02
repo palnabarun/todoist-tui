@@ -82,7 +82,7 @@ func LintCI() error {
 	return sh.Run("docker", "run", "--rm",
 		"-v", fmt.Sprintf("%s:/app", pwd),
 		"-w", "/app",
-		"golangci/golangci-lint:v1.61.0",
+		"golangci/golangci-lint:v2.3.0",
 		"golangci-lint", "run", "-v")
 }
 
@@ -99,7 +99,7 @@ func LintCIFix() error {
 	return sh.Run("docker", "run", "--rm",
 		"-v", fmt.Sprintf("%s:/app", pwd),
 		"-w", "/app",
-		"golangci/golangci-lint:v1.61.0",
+		"golangci/golangci-lint:v2.3.0",
 		"golangci-lint", "run", "--fix", "-v")
 }
 
