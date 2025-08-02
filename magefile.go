@@ -14,7 +14,7 @@ import (
 
 const (
 	appName = "todoist-tui"
-	version = "1.0.0"
+	version = "0.1.0"
 )
 
 // Default target to run when none is specified
@@ -72,12 +72,12 @@ func Lint() error {
 // LintCI runs golangci-lint in a container
 func LintCI() error {
 	fmt.Println("Running golangci-lint in container...")
-	
+
 	pwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
-	
+
 	// Use the official golangci-lint Docker image
 	return sh.Run("docker", "run", "--rm",
 		"-v", fmt.Sprintf("%s:/app", pwd),
@@ -89,12 +89,12 @@ func LintCI() error {
 // LintCIFix runs golangci-lint in a container with --fix
 func LintCIFix() error {
 	fmt.Println("Running golangci-lint in container with --fix...")
-	
+
 	pwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
-	
+
 	// Use the official golangci-lint Docker image
 	return sh.Run("docker", "run", "--rm",
 		"-v", fmt.Sprintf("%s:/app", pwd),
@@ -199,5 +199,49 @@ func CheckCI() error {
 func Release() error {
 	fmt.Println("Preparing release...")
 	mg.Deps(Check, BuildAll)
+	return nil
+}
+
+// List shows all available mage targets with descriptions
+func List() error {
+	fmt.Println("Available Mage targets:")
+	fmt.Println()
+
+	targets := []struct {
+		name, description string
+	}{
+		{"build", "Build binary for current platform (default)"},
+		{"buildall", "Build binaries for all supported platforms"},
+		{"clean", "Remove build artifacts"},
+		{"check", "Run all quality checks (lint + test)"},
+		{"checkci", "Run all quality checks with golangci-lint in container"},
+		{"deps", "Download and tidy dependencies"},
+		{"dev", "Run application in development mode"},
+		{"install", "Build and install binary to $GOPATH/bin"},
+		{"lint", "Run go fmt and go vet"},
+		{"lintci", "Run golangci-lint in container"},
+		{"lintcifix", "Run golangci-lint in container with --fix"},
+		{"list", "Show this help message"},
+		{"release", "Prepare release build (check + buildall)"},
+		{"test", "Run test suite"},
+	}
+
+	// Find the longest target name for formatting
+	maxLen := 0
+	for _, target := range targets {
+		if len(target.name) > maxLen {
+			maxLen = len(target.name)
+		}
+	}
+
+	// Print targets with aligned descriptions
+	for _, target := range targets {
+		fmt.Printf("  %-*s  %s\n", maxLen, target.name, target.description)
+	}
+
+	fmt.Println()
+	fmt.Printf("Usage: mage <target>\n")
+	fmt.Printf("Default target: %s\n", "build")
+
 	return nil
 }
