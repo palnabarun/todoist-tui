@@ -44,3 +44,6 @@ temp/
 
 # Linter cache
 .golangci-lint-cache/
+
+# release files
+dist/
