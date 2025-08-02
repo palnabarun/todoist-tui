@@ -405,13 +405,19 @@ func completeTask(client *TodoistClient, taskID string) tea.Cmd {
 	})
 }
 
-// createTask creates a command that creates a new task via Todoist API
-func createTask(client *TodoistClient, content string) tea.Cmd {
+// createTaskWithDetails creates a command that creates a new task with detailed parameters
+func createTaskWithDetails(client *TodoistClient, content string, priority int, projectID, deadline string) tea.Cmd {
 	return tea.Cmd(func() tea.Msg {
-		// Create the task request with today's due date
+		// Create the task request with form data
 		taskRequest := NewTaskRequest{
 			Content:   content,
-			DueString: "today",
+			Priority:  priority,
+			DueString: deadline,
+		}
+
+		// Add project ID if specified
+		if projectID != "" {
+			taskRequest.ProjectID = projectID
 		}
 
 		// Call the API to create the task

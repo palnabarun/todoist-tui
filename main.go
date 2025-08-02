@@ -101,12 +101,14 @@ type model struct {
 	showingPopup bool
 	// allTasks holds the complete list of tasks for navigation (overdue + today)
 	allTasks []TodoistTask
+	// projects holds the list of available projects
+	projects []TodoistProject
 	// showingCreateTask indicates whether the create task form is visible
 	showingCreateTask bool
-	// newTaskContent holds the content being typed for a new task
-	newTaskContent string
 	// creating indicates whether a task is currently being created
 	creating bool
+	// createTaskForm holds the form state for creating new tasks
+	createTaskForm createTaskFormState
 	// showingDeleteConfirm indicates whether the delete confirmation dialog is visible
 	showingDeleteConfirm bool
 	// taskToDelete holds the ID of the task pending deletion
@@ -115,6 +117,9 @@ type model struct {
 
 // tasksLoadedMsg is sent when tasks have been successfully loaded from the API
 type tasksLoadedMsg []TodoistTask
+
+// projectsLoadedMsg is sent when projects have been successfully loaded from the API
+type projectsLoadedMsg []TodoistProject
 
 // errorMsg is sent when an error occurs during API operations
 type errorMsg error
@@ -127,6 +132,27 @@ type taskCompletedMsg string
 
 // taskDeletedMsg is sent when a task has been successfully deleted
 type taskDeletedMsg string
+
+// createTaskFormField represents the different fields in the create task form
+type createTaskFormField int
+
+const (
+	fieldContent createTaskFormField = iota
+	fieldPriority
+	fieldProject
+	fieldDeadline
+)
+
+// createTaskFormState holds the state of the create task form
+type createTaskFormState struct {
+	content            string
+	priority           int    // 1-4 (1=low, 4=urgent)
+	projectID          string
+	projectName        string
+	selectedProjectIdx int    // Index in the projects list
+	deadline           string
+	activeField        createTaskFormField
+}
 
 // initialModel creates the initial application model with the specified columns
 func initialModel(columns []string) model {
@@ -148,9 +174,18 @@ func initialModel(columns []string) model {
 		selectedIndex:        -1,                      // No task selected initially
 		showingPopup:         false,                   // Popup hidden initially
 		allTasks:             []TodoistTask{},         // Empty task list initially
-		showingCreateTask:    false,                   // Create task form hidden initially
-		newTaskContent:       "",                      // Empty new task content initially
-		creating:             false,                   // Not creating a task initially
+		projects:             []TodoistProject{},      // Empty projects list initially
+		showingCreateTask: false, // Create task form hidden initially
+		creating:          false, // Not creating a task initially
+		createTaskForm: createTaskFormState{
+			content:            "",
+			priority:           1,           // Default to low priority
+			projectID:          "",          // No project selected initially
+			projectName:        "Inbox",     // Default to Inbox
+			selectedProjectIdx: -1,          // No project selected initially
+			deadline:           "today",     // Default to today
+			activeField:        fieldContent, // Start with content field active
+		},
 		showingDeleteConfirm: false,                   // Delete confirmation hidden initially
 		taskToDelete:         "",                      // No task pending deletion initially
 	}
@@ -158,12 +193,12 @@ func initialModel(columns []string) model {
 
 // Init is called when the program starts and returns the initial command to run
 func (m model) Init() tea.Cmd {
-	// Don't load tasks if there's already an error (e.g., missing token)
+	// Don't load data if there's already an error (e.g., missing token)
 	if m.error != nil {
 		return nil
 	}
-	// Start loading tasks from the API
-	return loadTasks(m.client)
+	// Start loading both tasks and projects from the API
+	return tea.Batch(loadTasks(m.client), loadProjects(m.client))
 }
 
 // loadTasks creates a command that fetches tasks from Todoist API in the background
@@ -177,6 +212,20 @@ func loadTasks(client *TodoistClient) tea.Cmd {
 		}
 		// Return loaded tasks on success
 		return tasksLoadedMsg(tasks)
+	})
+}
+
+// loadProjects creates a command that fetches projects from Todoist API in the background
+func loadProjects(client *TodoistClient) tea.Cmd {
+	return tea.Cmd(func() tea.Msg {
+		// Call the API to get projects
+		projects, err := client.GetProjects()
+		if err != nil {
+			// Return error message if API call fails
+			return errorMsg(err)
+		}
+		// Return loaded projects on success
+		return projectsLoadedMsg(projects)
 	})
 }
 
@@ -241,11 +290,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case projectsLoadedMsg:
+		// Handle successful project loading
+		m.projects = []TodoistProject(msg)
+		// Set default project to first one (usually Inbox) if available
+		if len(m.projects) > 0 {
+			m.createTaskForm.selectedProjectIdx = 0
+			m.createTaskForm.projectID = m.projects[0].ID
+			m.createTaskForm.projectName = m.projects[0].Name
+		}
+
 	case taskCreatedMsg:
 		// Handle successful task creation
 		m.creating = false
 		m.showingCreateTask = false
-		m.newTaskContent = "" // Refresh tasks to show the new task
+		// Reset form state with first project if available
+		defaultProjectIdx := -1
+		defaultProjectID := ""
+		defaultProjectName := "Inbox"
+		if len(m.projects) > 0 {
+			defaultProjectIdx = 0
+			defaultProjectID = m.projects[0].ID
+			defaultProjectName = m.projects[0].Name
+		}
+		m.createTaskForm = createTaskFormState{
+			content:            "",
+			priority:           1,
+			projectID:          defaultProjectID,
+			projectName:        defaultProjectName,
+			selectedProjectIdx: defaultProjectIdx,
+			deadline:           "today",
+			activeField:        fieldContent,
+		}
 		m.loading = true
 
 		return m, loadTasks(m.client)
@@ -748,36 +824,90 @@ func (m model) renderTaskPopup() string {
 // renderCreateTaskForm creates a form view for creating new tasks
 func (m model) renderCreateTaskForm() string {
 	var content strings.Builder
+	form := m.createTaskForm
 
 	// Form title
 	content.WriteString(popupTitleStyle.Render("📝 Create New Task"))
 	content.WriteString("\n\n")
 
-	// Task content input
-	content.WriteString(popupFieldStyle.Render("Task: "))
-	if m.creating {
-		content.WriteString(m.newTaskContent + " (Creating...)")
+	// Task content field
+	if form.activeField == fieldContent {
+		content.WriteString(popupFieldStyle.Render("→ Task: "))
 	} else {
-		content.WriteString(m.newTaskContent + "│") // Add cursor
+		content.WriteString(popupFieldStyle.Render("  Task: "))
+	}
+	if m.creating {
+		content.WriteString(form.content + " (Creating...)")
+	} else if form.activeField == fieldContent {
+		content.WriteString(form.content + "│")
+	} else {
+		content.WriteString(form.content)
 	}
 	content.WriteString("\n\n")
 
-	// Due date info
-	content.WriteString(popupFieldStyle.Render("Due Date: "))
-	content.WriteString("Today (automatically set)")
+	// Priority field
+	if form.activeField == fieldPriority {
+		content.WriteString(popupFieldStyle.Render("→ Priority: "))
+	} else {
+		content.WriteString(popupFieldStyle.Render("  Priority: "))
+	}
+	priorityText := map[int]string{
+		1: "P4 (Low)",
+		2: "P3 (Normal)",
+		3: "P2 (High)",
+		4: "P1 (Urgent)",
+	}
+	content.WriteString(priorityText[form.priority])
+	content.WriteString("\n\n")
+
+	// Project field
+	if form.activeField == fieldProject {
+		content.WriteString(popupFieldStyle.Render("→ Project: "))
+	} else {
+		content.WriteString(popupFieldStyle.Render("  Project: "))
+	}
+	// Show project with navigation indicators if this field is active
+	if form.activeField == fieldProject && len(m.projects) > 1 {
+		content.WriteString("◀ " + form.projectName + " ▶")
+		content.WriteString(fmt.Sprintf(" (%d/%d)", form.selectedProjectIdx+1, len(m.projects)))
+	} else {
+		content.WriteString(form.projectName)
+	}
+	content.WriteString("\n\n")
+
+	// Deadline field
+	if form.activeField == fieldDeadline {
+		content.WriteString(popupFieldStyle.Render("→ Deadline: "))
+	} else {
+		content.WriteString(popupFieldStyle.Render("  Deadline: "))
+	}
+	if form.activeField == fieldDeadline {
+		content.WriteString(form.deadline + "│")
+	} else {
+		content.WriteString(form.deadline)
+	}
 	content.WriteString("\n\n")
 
 	// Instructions
 	if m.creating {
 		content.WriteString("Creating task...")
 	} else {
-		content.WriteString("Type task content • Enter: create • ESC: cancel")
+		content.WriteString("Tab/Arrow: navigate • Enter: create • ESC: cancel")
+		content.WriteString("\n")
+		switch form.activeField {
+		case fieldPriority:
+			content.WriteString("←/→: change priority")
+		case fieldProject:
+			content.WriteString("←/→/↑/↓: select project")
+		default:
+			content.WriteString("Type to edit field")
+		}
 	}
 
 	// Calculate popup size and position
 	popupContent := content.String()
-	maxWidth := 50
-	if m.width < 60 {
+	maxWidth := 60
+	if m.width < 70 {
 		maxWidth = m.width - 10
 	}
 
@@ -872,7 +1002,7 @@ func (m model) handleMainViewInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open task in Todoist if we have selection
 		if m.selectedIndex >= 0 && m.selectedIndex < len(m.allTasks) {
 			task := m.allTasks[m.selectedIndex]
-			browser.OpenURL(task.URL)
+			_ = browser.OpenURL(task.URL)
 		}
 	case "e", "E":
 		// Complete the selected task if we have selection
@@ -884,7 +1014,15 @@ func (m model) handleMainViewInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Show create task form
 		if !m.creating {
 			m.showingCreateTask = true
-			m.newTaskContent = ""
+			// Reset form state
+			m.createTaskForm = createTaskFormState{
+				content:     "",
+				priority:    1,
+				projectID:   "",
+				projectName: "Inbox",
+				deadline:    "today",
+				activeField: fieldContent,
+			}
 		}
 		// Delete case is now handled globally above
 	}
@@ -926,22 +1064,113 @@ func (m model) handleCreateTaskInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "escape":
 		// Cancel create task form
 		m.showingCreateTask = false
-		m.newTaskContent = ""
+		m.createTaskForm = createTaskFormState{
+			content:     "",
+			priority:    1,
+			projectID:   "",
+			projectName: "Inbox",
+			deadline:    "today",
+			activeField: fieldContent,
+		}
 	case "enter":
 		// Submit the new task if content is not empty
-		if strings.TrimSpace(m.newTaskContent) != "" {
+		if strings.TrimSpace(m.createTaskForm.content) != "" {
 			m.creating = true
-			return m, createTask(m.client, m.newTaskContent)
+			return m, createTaskWithDetails(m.client, 
+				m.createTaskForm.content, 
+				m.createTaskForm.priority, 
+				m.createTaskForm.projectID, 
+				m.createTaskForm.deadline)
+		}
+	case "tab", "down":
+		// Move to next field
+		switch m.createTaskForm.activeField {
+		case fieldContent:
+			m.createTaskForm.activeField = fieldPriority
+		case fieldPriority:
+			m.createTaskForm.activeField = fieldProject
+		case fieldProject:
+			m.createTaskForm.activeField = fieldDeadline
+		case fieldDeadline:
+			m.createTaskForm.activeField = fieldContent
+		}
+	case "shift+tab", "up":
+		// Move to previous field
+		switch m.createTaskForm.activeField {
+		case fieldContent:
+			m.createTaskForm.activeField = fieldDeadline
+		case fieldPriority:
+			m.createTaskForm.activeField = fieldContent
+		case fieldProject:
+			m.createTaskForm.activeField = fieldPriority
+		case fieldDeadline:
+			m.createTaskForm.activeField = fieldProject
 		}
 	case "backspace":
-		// Remove last character
-		if len(m.newTaskContent) > 0 {
-			m.newTaskContent = m.newTaskContent[:len(m.newTaskContent)-1]
+		// Handle backspace for current field
+		switch m.createTaskForm.activeField {
+		case fieldContent:
+			if len(m.createTaskForm.content) > 0 {
+				m.createTaskForm.content = m.createTaskForm.content[:len(m.createTaskForm.content)-1]
+			}
+		case fieldDeadline:
+			if len(m.createTaskForm.deadline) > 0 {
+				m.createTaskForm.deadline = m.createTaskForm.deadline[:len(m.createTaskForm.deadline)-1]
+			}
 		}
 	default:
-		// Add typed characters to task content
-		if len(msg.String()) == 1 && msg.String() != "\x1b" { // Ignore escape sequences
-			m.newTaskContent += msg.String()
+		// Handle field-specific input
+		switch m.createTaskForm.activeField {
+		case fieldContent:
+			// Add typed characters to task content
+			if len(msg.String()) == 1 && msg.String() != "\x1b" {
+				m.createTaskForm.content += msg.String()
+			}
+		case fieldPriority:
+			// Handle priority changes with arrow keys
+			switch msg.String() {
+			case "right":
+				if m.createTaskForm.priority < 4 {
+					m.createTaskForm.priority++
+				}
+			case "left":
+				if m.createTaskForm.priority > 1 {
+					m.createTaskForm.priority--
+				}
+			}
+		case fieldProject:
+			// Handle project selection with arrow keys
+			switch msg.String() {
+			case "right", "down":
+				if len(m.projects) > 0 {
+					if m.createTaskForm.selectedProjectIdx < len(m.projects)-1 {
+						m.createTaskForm.selectedProjectIdx++
+					} else {
+						m.createTaskForm.selectedProjectIdx = 0 // Wrap to first project
+					}
+					// Update project info
+					project := m.projects[m.createTaskForm.selectedProjectIdx]
+					m.createTaskForm.projectID = project.ID
+					m.createTaskForm.projectName = project.Name
+				}
+			case "left", "up":
+				if len(m.projects) > 0 {
+					if m.createTaskForm.selectedProjectIdx > 0 {
+						m.createTaskForm.selectedProjectIdx--
+					} else {
+						m.createTaskForm.selectedProjectIdx = len(m.projects) - 1 // Wrap to last project
+					}
+					// Update project info
+					project := m.projects[m.createTaskForm.selectedProjectIdx]
+					m.createTaskForm.projectID = project.ID
+					m.createTaskForm.projectName = project.Name
+				}
+			}
+		case fieldDeadline:
+			// Add typed characters to deadline
+			if len(msg.String()) == 1 && msg.String() != "\x1b" {
+				m.createTaskForm.deadline += msg.String()
+			}
 		}
 	}
 	return m, nil
